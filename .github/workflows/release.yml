@@ -1,0 +1,174 @@
+name: Release
+
+on:
+  push:
+    # Trigger on version tags
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v4.0.0
+  
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (without v prefix)'
+        required: true
+      prerelease:
+        description: 'Is this a pre-release?'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  # Build and test packages
+  build:
+    name: Build Packages
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      is_prerelease: ${{ steps.get_version.outputs.is_prerelease }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+      
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install setuptools>=69.0.2 wheel>=0.42.0 build>=1.0.3
+          python -m pip install pytest pytest-asyncio pytest-cov pytest-benchmark pytest-memray hypothesis
+      
+      - name: Install project in development mode
+        run: |
+          python -m pip install -e ".[dev]"
+      
+      - name: Run tests
+        run: |
+          python -m pytest
+      
+      - name: Extract version
+        id: get_version
+        run: |
+          # Get version from tag or input
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            # For tag push, get version from the tag
+            VERSION=${GITHUB_REF#refs/tags/v}
+            IS_PRERELEASE="false"
+          else
+            # For manual trigger, use the input version
+            VERSION=${{ github.event.inputs.version }}
+            IS_PRERELEASE=${{ github.event.inputs.prerelease }}
+          fi
+          
+          # Get version from pyproject.toml for verification
+          PACKAGE_VERSION=$(grep -Po '(?<=version = ")[^"]*' src/backend/pyproject.toml)
+          
+          # Verify versions match
+          if [[ "$VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "Error: Version mismatch! Tag/input version: $VERSION, Package version: $PACKAGE_VERSION"
+            exit 1
+          fi
+          
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
+      
+      - name: Create build helper script
+        run: |
+          cat << 'EOF' > build_helper.sh
+          #!/bin/bash
+          # Source the build.sh to get access to its functions
+          source infrastructure/scripts/build.sh
+          
+          # Call the function passed as argument
+          $1
+          EOF
+          
+          chmod +x build_helper.sh
+      
+      - name: Run Python environment checks
+        run: ./build_helper.sh check_python_version
+      
+      - name: Check build dependencies
+        run: ./build_helper.sh check_build_deps
+      
+      - name: Build backend package
+        run: ./build_helper.sh build_backend
+      
+      - name: Build web package
+        run: ./build_helper.sh build_web
+        continue-on-error: true  # Web build is optional
+      
+      - name: Upload backend package artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: backend-dist
+          path: src/backend/dist/
+      
+      - name: Upload web package artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: web-dist
+          path: src/web/dist/
+        if: ${{ success() && hashFiles('src/web/dist/*') != '' }}
+      
+      - name: Create tag if running manually
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a v${{ steps.get_version.outputs.version }} -m "Release v${{ steps.get_version.outputs.version }}"
+          git push origin v${{ steps.get_version.outputs.version }}
+        continue-on-error: true  # If tag already exists, don't fail
+
+  # Publish packages to PyPI
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Download backend artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: backend-dist
+          path: dist/backend
+      
+      - name: Download web artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: web-dist
+          path: dist/web
+        continue-on-error: true
+      
+      - name: Publish backend package to PyPI
+        uses: pypa/gh-action-pypi-publish@v1
+        with:
+          packages-dir: dist/backend
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+      
+      - name: Publish web package to PyPI
+        uses: pypa/gh-action-pypi-publish@v1
+        with:
+          packages-dir: dist/web
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+        if: ${{ hashFiles('dist/web/*') != '' }}
+      
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: Release v${{ needs.build.outputs.version }}
+          draft: false
+          prerelease: ${{ needs.build.outputs.is_prerelease == 'true' }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

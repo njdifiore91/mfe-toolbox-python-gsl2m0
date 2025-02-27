@@ -1,0 +1,28 @@
+exclude_dirs:
+  - .git
+  - __pycache__
+  - .mypy_cache
+  - .pytest_cache
+  - build
+  - dist
+  - "*.egg-info"
+
+tests_dirs:
+  - src/backend/tests
+  - src/web/tests
+
+bandit:
+  targets:
+    - src/backend
+    - src/web
+  skips:
+    - B101
+    - B404
+    - B603
+  confidence-level: HIGH
+  severity-level: MEDIUM
+  recursive: true
+  format: json
+  output: bandit-results.json
+  verbose: true
+  number: 3

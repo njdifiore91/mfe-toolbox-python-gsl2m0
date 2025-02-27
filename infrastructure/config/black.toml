@@ -1,0 +1,7 @@
+# Black configuration settings for MFE Toolbox
+# Using Black version 23.11.0
+[tool.black]
+line-length = 120
+target-version = ["py312"]
+include = '\\.pyi?$'
+extend-exclude = '\\.git,__pycache__,.mypy_cache,.pytest_cache,build,dist,*.egg-info'
